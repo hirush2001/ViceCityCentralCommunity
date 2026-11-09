@@ -7,6 +7,7 @@ import AuthModal from "@/components/auth-modal";
 import PollsPanel from "@/components/polls-panel";
 import { NotificationsBell } from "@/components/notifications-center";
 import { createClient } from "@/lib/supabase/client";
+import ReleaseCountdown from "@/components/release-countdown";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import {
   ArrowDownRight,
@@ -682,6 +683,8 @@ export default function CommunityHome() {
       <section className="ticker" aria-label="Community topics">
         <div className="ticker-track"><span>THEORIES</span><i /> <span>CHARACTERS</span><i /> <span>VICE CITY</span><i /> <span>VEHICLE CULTURE</span><i /> <span>LEONIDA</span><i /> <span>COMMUNITY FIRST</span><i /> <span>THEORIES</span><i /> <span>CHARACTERS</span><i /> <span>VICE CITY</span><i /> <span>VEHICLE CULTURE</span><i /> <span>LEONIDA</span><i /></div>
       </section>
+
+      <ReleaseCountdown />
 
       <section className="content-section" id="community">
         <div className="section-heading">
