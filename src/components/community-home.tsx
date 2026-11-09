@@ -1,8 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import type { User } from "@supabase/supabase-js";
 import AuthModal from "@/components/auth-modal";
+import PollsPanel from "@/components/polls-panel";
+import { NotificationsBell } from "@/components/notifications-center";
 import { createClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import {
@@ -25,7 +28,6 @@ import {
   Search,
   Send,
   ShieldCheck,
-  Sparkles,
   ThumbsUp,
   TrendingUp,
   Users,
@@ -37,6 +39,8 @@ type Category = "All posts" | "Theories" | "Characters" | "Vehicles" | "Location
 type Post = {
   id: string | number;
   authorId?: string;
+  authorUsername?: string;
+  authorAvatarUrl?: string | null;
   author: string;
   initials: string;
   role: string;
@@ -120,6 +124,20 @@ type Profile = {
   bio?: string;
 };
 
+type CommunityComment = {
+  id: string;
+  postId: string;
+  authorId: string;
+  authorUsername?: string;
+  authorAvatarUrl?: string | null;
+  parentCommentId: string | null;
+  body: string;
+  author: string;
+  initials: string;
+  time: string;
+  accent: "pink" | "blue" | "orange" | "purple";
+};
+
 function relativeTime(value: string) {
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
   if (seconds < 60) return "just now";
@@ -135,18 +153,27 @@ export default function CommunityHome() {
   const [saved, setSaved] = useState<Array<string | number>>([]);
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [followingIds, setFollowingIds] = useState<string[]>([]);
+  const [feedMode, setFeedMode] = useState<"everyone" | "following">("everyone");
+  const [followingLoading, setFollowingLoading] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signup");
   const [postLoading, setPostLoading] = useState(false);
   const [postError, setPostError] = useState("");
   const [isPublishing, setIsPublishing] = useState(false);
-  const [voted, setVoted] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [composerOpen, setComposerOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newBody, setNewBody] = useState("");
   const [newCategory, setNewCategory] = useState<Exclude<Category, "All posts">>("Theories");
+  const [expandedCommentsPostId, setExpandedCommentsPostId] = useState<string | null>(null);
+  const [commentsByPost, setCommentsByPost] = useState<Record<string, CommunityComment[]>>({});
+  const [commentsLoadingPostId, setCommentsLoadingPostId] = useState<string | null>(null);
+  const [commentDraft, setCommentDraft] = useState("");
+  const [replyTarget, setReplyTarget] = useState<{ id: string; author: string } | null>(null);
+  const [isSendingComment, setIsSendingComment] = useState(false);
+  const [commentError, setCommentError] = useState("");
 
   useEffect(() => {
     if (!isSupabaseConfigured()) return;
@@ -180,6 +207,34 @@ export default function CommunityHome() {
     }
 
     void loadProfile();
+    return () => { active = false; };
+  }, [user]);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadFollowingIds() {
+      if (!user || !isSupabaseConfigured()) {
+        setFollowingIds([]);
+        setFeedMode("everyone");
+        return;
+      }
+      setFollowingLoading(true);
+      const { data, error } = await createClient()
+        .from("member_follows")
+        .select("following_id")
+        .eq("follower_id", user.id);
+      if (!active) return;
+      if (error) {
+        console.error("Could not load followed members:", error.message);
+        setFollowingIds([]);
+      } else {
+        setFollowingIds((data ?? []).map((row: { following_id: string }) => row.following_id));
+      }
+      setFollowingLoading(false);
+    }
+
+    void loadFollowingIds();
     return () => { active = false; };
   }, [user]);
 
@@ -219,13 +274,13 @@ export default function CommunityHome() {
 
       const [profileResult, likeResult, commentResult] = postIds.length
         ? await Promise.all([
-            supabase.from("profiles").select("id, username, display_name").in("id", authorIds),
+            supabase.from("profiles").select("id, username, display_name, avatar_url").in("id", authorIds),
             supabase.from("post_likes").select("post_id").in("post_id", postIds),
             supabase.from("comments").select("post_id").eq("status", "published").in("post_id", postIds)
           ])
         : [{ data: [] }, { data: [] }, { data: [] }];
 
-      const profiles = (profileResult.data ?? []) as Array<Pick<Profile, "id" | "username" | "display_name">>;
+      const profiles = (profileResult.data ?? []) as Array<Pick<Profile, "id" | "username" | "display_name" | "avatar_url">>;
       const profileMap = new Map(profiles.map((item) => [item.id, item]));
       const likeCounts = new Map<string, number>();
       const commentCounts = new Map<string, number>();
@@ -242,6 +297,8 @@ export default function CommunityHome() {
         return {
           id: row.id,
           authorId: row.author_id,
+          authorUsername: author?.username,
+          authorAvatarUrl: author?.avatar_url ?? null,
           author: display,
           initials: display.slice(0, 2).toUpperCase(),
           role: "Community member",
@@ -285,9 +342,10 @@ export default function CommunityHome() {
     return posts.filter((post) => {
       const matchesCategory = activeCategory === "All posts" || post.category === activeCategory;
       const matchesSearch = !term || `${post.title} ${post.body} ${post.author} ${post.category}`.toLowerCase().includes(term);
-      return matchesCategory && matchesSearch;
+      const matchesFeed = feedMode === "everyone" || Boolean(post.authorId && followingIds.includes(post.authorId));
+      return matchesCategory && matchesSearch && matchesFeed;
     });
-  }, [activeCategory, posts, search]);
+  }, [activeCategory, feedMode, followingIds, posts, search]);
 
   function startDiscussion() {
     if (!user) {
@@ -300,7 +358,11 @@ export default function CommunityHome() {
 
   function joinCommunity() {
     if (user) {
-      document.getElementById("community")?.scrollIntoView({ behavior: "smooth" });
+      if (profile?.username) {
+        window.location.assign(`/members/${encodeURIComponent(profile.username)}`);
+      } else {
+        document.getElementById("community")?.scrollIntoView({ behavior: "smooth" });
+      }
       return;
     }
     setAuthMode("signup");
@@ -399,6 +461,8 @@ export default function CommunityHome() {
     const post: Post = {
       id: data.id,
       authorId: user.id,
+      authorUsername: profile?.username,
+      authorAvatarUrl: profile?.avatar_url ?? null,
       author: display,
       initials: display.slice(0, 2).toUpperCase(),
       role: "Community member",
@@ -420,12 +484,151 @@ export default function CommunityHome() {
     setIsPublishing(false);
   }
 
-  const pollOptions = [
-    { label: "Explore Vice City", percent: 48 },
-    { label: "Hit the highways", percent: 23 },
-    { label: "Discover the Keys", percent: 19 },
-    { label: "Explore the countryside", percent: 10 }
-  ];
+  async function toggleComments(postId: string | number) {
+    if (typeof postId !== "string") {
+      alert("Comments are available on published community discussions.");
+      return;
+    }
+
+    if (expandedCommentsPostId === postId) {
+      setExpandedCommentsPostId(null);
+      setReplyTarget(null);
+      setCommentDraft("");
+      setCommentError("");
+      return;
+    }
+
+    setExpandedCommentsPostId(postId);
+    setReplyTarget(null);
+    setCommentDraft("");
+    setCommentError("");
+    if (commentsByPost[postId]) return;
+
+    setCommentsLoadingPostId(postId);
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("comments")
+      .select("id, post_id, author_id, parent_comment_id, body, created_at")
+      .eq("post_id", postId)
+      .eq("status", "published")
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      setCommentError(error.message);
+      setCommentsLoadingPostId(null);
+      return;
+    }
+
+    const rows = (data ?? []) as Array<{
+      id: string;
+      post_id: string;
+      author_id: string;
+      parent_comment_id: string | null;
+      body: string;
+      created_at: string;
+    }>;
+    const authorIds = [...new Set(rows.map((row) => row.author_id))];
+    const profileResult = authorIds.length
+      ? await supabase.from("profiles").select("id, username, display_name, avatar_url").in("id", authorIds)
+      : { data: [] };
+    const profileRows = (profileResult.data ?? []) as Array<Pick<Profile, "id" | "username" | "display_name" | "avatar_url">>;
+    const profileMap = new Map(profileRows.map((item) => [item.id, item]));
+
+    const mappedComments: CommunityComment[] = rows.map((row, index) => {
+      const authorProfile = profileMap.get(row.author_id);
+      const display = authorProfile?.display_name || authorProfile?.username || "Vice City member";
+      return {
+        id: row.id,
+        postId: row.post_id,
+        authorId: row.author_id,
+        authorUsername: authorProfile?.username,
+        authorAvatarUrl: authorProfile?.avatar_url ?? null,
+        parentCommentId: row.parent_comment_id,
+        body: row.body,
+        author: display,
+        initials: display.slice(0, 2).toUpperCase(),
+        time: relativeTime(row.created_at),
+        accent: (["pink", "blue", "orange", "purple"] as const)[index % 4]
+      };
+    });
+
+    setCommentsByPost((current) => ({ ...current, [postId]: mappedComments }));
+    setCommentsLoadingPostId(null);
+  }
+
+  async function submitComment(postId: string) {
+    const body = commentDraft.trim();
+    if (!body || isSendingComment) return;
+    if (!user) {
+      setAuthMode("signin");
+      setAuthOpen(true);
+      return;
+    }
+
+    setIsSendingComment(true);
+    setCommentError("");
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("comments")
+      .insert({
+        post_id: postId,
+        author_id: user.id,
+        parent_comment_id: replyTarget?.id ?? null,
+        body,
+        status: "published"
+      })
+      .select("id, post_id, author_id, parent_comment_id, body, created_at")
+      .single();
+
+    if (error) {
+      setCommentError(error.message);
+      setIsSendingComment(false);
+      return;
+    }
+
+    const display = profile?.display_name || profile?.username || user.email?.split("@")[0] || "Member";
+    const newComment: CommunityComment = {
+      id: data.id,
+      postId: data.post_id,
+      authorId: data.author_id,
+      authorUsername: profile?.username,
+      authorAvatarUrl: profile?.avatar_url ?? null,
+      parentCommentId: data.parent_comment_id,
+      body: data.body,
+      author: display,
+      initials: display.slice(0, 2).toUpperCase(),
+      time: relativeTime(data.created_at),
+      accent: "pink"
+    };
+
+    setCommentsByPost((current) => ({
+      ...current,
+      [postId]: [...(current[postId] ?? []), newComment]
+    }));
+    setPosts((current) => current.map((post) =>
+      post.id === postId ? { ...post, comments: post.comments + 1 } : post
+    ));
+    setCommentDraft("");
+    setReplyTarget(null);
+    setIsSendingComment(false);
+  }
+
+  function renderComment(comment: CommunityComment, threadComments: CommunityComment[], depth = 0): ReactNode {
+    const replies = threadComments.filter((item) => item.parentCommentId === comment.id);
+    return (
+      <div className={`comment-thread-item ${depth > 0 ? "comment-thread-reply" : ""}`} key={comment.id} style={{ marginLeft: depth > 0 ? Math.min(depth, 3) * 14 : 0 }}>
+        <a className="comment-avatar-link" href={comment.authorUsername ? `/members/${encodeURIComponent(comment.authorUsername)}` : undefined} aria-label={comment.authorUsername ? `View ${comment.author}'s profile` : undefined}>
+          {comment.authorAvatarUrl ? <img className="comment-avatar-image" src={comment.authorAvatarUrl} alt="" /> : <div className={`comment-avatar avatar-${comment.accent}`}>{comment.initials}</div>}
+        </a>
+        <div className="comment-content">
+          <div className="comment-byline">{comment.authorUsername ? <a href={`/members/${encodeURIComponent(comment.authorUsername)}`}><strong>{comment.author}</strong></a> : <strong>{comment.author}</strong>}<span>· {comment.time}</span></div>
+          <p>{comment.body}</p>
+          <button type="button" className="comment-reply-button" onClick={() => { setReplyTarget({ id: comment.id, author: comment.author }); setCommentDraft(""); }}>Reply</button>
+          {replies.length > 0 && <div className="comment-replies">{replies.map((reply) => renderComment(reply, threadComments, depth + 1))}</div>}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <main className="site-shell">
@@ -446,10 +649,12 @@ export default function CommunityHome() {
           <a className="nav-link active" href="#community" onClick={() => setMobileMenuOpen(false)}>Community</a>
           <a className="nav-link" href="#discover" onClick={() => setMobileMenuOpen(false)}>Discover</a>
           <a className="nav-link" href="#pulse" onClick={() => setMobileMenuOpen(false)}>Polls</a>
+          {user && <a className="nav-link" href="/saved" onClick={() => setMobileMenuOpen(false)}>Saved</a>}
           <a className="nav-link" href="#about" onClick={() => setMobileMenuOpen(false)}>About</a>
         </nav>
         <div className="header-actions">
           <button className="icon-button header-search" aria-label="Focus search" onClick={() => document.getElementById("community-search")?.focus()}><Search size={17} /></button>
+          {user && <NotificationsBell userId={user.id} />}
           <button className="button button-outline sign-in-button" onClick={() => user ? void signOut() : (setAuthMode("signin"), setAuthOpen(true))}>{user ? "Sign out" : "Sign in"} <ArrowRight size={14} /></button>
           <button className="button button-primary header-join" onClick={joinCommunity}>{user ? `@${profile?.username || "member"}` : "Join the crew"} <ArrowDownRight size={15} /></button>
           <button className="icon-button mobile-menu-toggle" aria-label="Toggle navigation" onClick={() => setMobileMenuOpen((open) => !open)}>{mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}</button>
@@ -490,6 +695,17 @@ export default function CommunityHome() {
 
         <div className="community-layout">
           <div className="feed-column">
+            <div className="feed-mode-switch" role="tablist" aria-label="Choose community feed">
+              <button type="button" className={`feed-mode-button ${feedMode === "everyone" ? "selected" : ""}`} onClick={() => setFeedMode("everyone")}>Everyone</button>
+              <button type="button" className={`feed-mode-button ${feedMode === "following" ? "selected" : ""}`} onClick={() => {
+                if (!user) {
+                  setAuthMode("signin");
+                  setAuthOpen(true);
+                  return;
+                }
+                setFeedMode("following");
+              }}>Following {followingLoading ? "…" : ""}</button>
+            </div>
             <div className="feed-toolbar">
               <div className="category-tabs" role="tablist" aria-label="Filter discussions">
                 {categories.map((category) => <button key={category} className={`category-tab ${activeCategory === category ? "selected" : ""}`} onClick={() => setActiveCategory(category)}>{category}</button>)}
@@ -503,44 +719,58 @@ export default function CommunityHome() {
             {postError && <div className="feed-status feed-status-error">Could not load the live feed: {postError}</div>}
 
             <div className="post-list">
-              {visiblePosts.length === 0 ? <div className="empty-state"><Search size={24} /><h3>{isSupabaseConfigured() && !search ? "Be the first to start a discussion" : "No discussions found"}</h3><p>{isSupabaseConfigured() && !search ? "The community feed is ready for its first post." : "Try another keyword or category."}</p>{search && <button className="text-button" onClick={() => { setSearch(""); setActiveCategory("All posts"); }}>Clear filters</button>}</div> : visiblePosts.map((post) => (
-                <article className="post-card" key={post.id}>
-                  <div className={`avatar avatar-${post.accent}`}>{post.initials}</div>
-                  <div className="post-main">
-                    <div className="post-byline"><strong>{post.author}</strong><span className="author-role">{post.role}</span><span className="post-time">· {post.time}</span><span className={`post-tag tag-${post.accent}`}>{post.tag}</span></div>
-                    <h3>{post.title}</h3>
-                    <p>{post.body}</p>
-                    <div className="post-actions">
-                      <button className={`post-action ${liked.includes(post.id) ? "is-liked" : ""}`} onClick={() => toggleLike(post.id)} aria-label="Like discussion"><Heart size={15} fill={liked.includes(post.id) ? "currentColor" : "none"} /> {post.likes}</button>
-                      <button className="post-action" onClick={() => alert("Comment threads are the next feature. Your account and community posts are now connected.")}><MessageCircle size={15} /> {post.comments} replies</button>
-                      <button className={`post-action save-action ${saved.includes(post.id) ? "is-saved" : ""}`} onClick={() => toggleSave(post.id)} aria-label="Save discussion"><Bookmark size={15} /> {saved.includes(post.id) ? "Saved" : "Save"}</button>
+              {visiblePosts.length === 0 ? <div className="empty-state"><Search size={24} /><h3>{feedMode === "following" && !search ? "Your Following feed is ready" : isSupabaseConfigured() && !search ? "Be the first to start a discussion" : "No discussions found"}</h3><p>{feedMode === "following" && !search ? (followingIds.length === 0 ? "You are not following anyone yet. Open a member profile and follow people to build your personal feed." : "The members you follow have not published any discussions yet.") : isSupabaseConfigured() && !search ? "The community feed is ready for its first post." : "Try another keyword or category."}</p>{feedMode === "following" && <button className="text-button" onClick={() => setFeedMode("everyone")}>Explore everyone&apos;s posts</button>}{search && <button className="text-button" onClick={() => { setSearch(""); setActiveCategory("All posts"); }}>Clear filters</button>}</div> : visiblePosts.map((post) => {
+                const postComments = commentsByPost[String(post.id)] ?? [];
+                const isThreadOpen = expandedCommentsPostId === String(post.id);
+                return (
+                  <article className="post-card" id={`post-${post.id}`} key={post.id}>
+                    {post.authorUsername ? (
+                      <a className="post-avatar-link" href={`/members/${encodeURIComponent(post.authorUsername)}`} aria-label={`View ${post.author}'s profile`}>
+                        {post.authorAvatarUrl ? <img className="avatar-image" src={post.authorAvatarUrl} alt="" /> : <div className={`avatar avatar-${post.accent}`}>{post.initials}</div>}
+                      </a>
+                    ) : <div className={`avatar avatar-${post.accent}`}>{post.initials}</div>}
+                    <div className="post-main">
+                      <div className="post-byline">{post.authorUsername ? <a className="post-author-link" href={`/members/${encodeURIComponent(post.authorUsername)}`}><strong>{post.author}</strong></a> : <strong>{post.author}</strong>}<span className="author-role">{post.role}</span><span className="post-time">· {post.time}</span><span className={`post-tag tag-${post.accent}`}>{post.tag}</span></div>
+                      <h3>{post.title}</h3>
+                      <p>{post.body}</p>
+                      <div className="post-actions">
+                        <button className={`post-action ${liked.includes(post.id) ? "is-liked" : ""}`} onClick={() => toggleLike(post.id)} aria-label="Like discussion"><Heart size={15} fill={liked.includes(post.id) ? "currentColor" : "none"} /> {post.likes}</button>
+                        <button className={`post-action ${isThreadOpen ? "is-thread-open" : ""}`} onClick={() => void toggleComments(post.id)} aria-expanded={isThreadOpen}><MessageCircle size={15} /> {post.comments} {post.comments === 1 ? "reply" : "replies"}</button>
+                        <button className={`post-action save-action ${saved.includes(post.id) ? "is-saved" : ""}`} onClick={() => toggleSave(post.id)} aria-label="Save discussion"><Bookmark size={15} /> {saved.includes(post.id) ? "Saved" : "Save"}</button>
+                      </div>
+                      {typeof post.id === "string" && isThreadOpen && (
+                        <section className="comments-panel" aria-label={`Comments for ${post.title}`}>
+                          <div className="comments-panel-heading"><span>DISCUSSION THREAD</span><span>{postComments.length} COMMENTS & REPLIES</span></div>
+                          {commentsLoadingPostId === post.id && <div className="comments-empty">Loading comments...</div>}
+                          {commentError && <div className="comment-error">{commentError}</div>}
+                          {commentsLoadingPostId !== post.id && postComments.length === 0 && !commentError && <div className="comments-empty">No replies yet. Start the conversation.</div>}
+                          <div className="comment-thread-list">
+                            {postComments.filter((comment) => !comment.parentCommentId).map((comment) => renderComment(comment, postComments))}
+                          </div>
+                          <form className="comment-composer" onSubmit={(event) => { event.preventDefault(); void submitComment(post.id as string); }}>
+                            {replyTarget && <div className="replying-to"><span>REPLYING TO <strong>{replyTarget.author}</strong></span><button type="button" aria-label="Cancel reply" onClick={() => setReplyTarget(null)}><X size={13} /></button></div>}
+                            <textarea value={commentDraft} onChange={(event) => setCommentDraft(event.target.value)} maxLength={1500} rows={3} placeholder={replyTarget ? `Reply to ${replyTarget.author}...` : "Add to the conversation..."} />
+                            <div className="comment-composer-footer"><span>{commentDraft.length}/1500 characters</span><button className="button button-primary" type="submit" disabled={!commentDraft.trim() || isSendingComment}>{isSendingComment ? "Sending..." : replyTarget ? "Send reply" : "Post comment"} <Send size={13} /></button></div>
+                          </form>
+                        </section>
+                      )}
                     </div>
-                  </div>
-                  <span className="post-more" aria-hidden="true"><span /><span /><span /></span>
-                </article>
-              ))}
+                    <span className="post-more" aria-hidden="true"><span /><span /><span /></span>
+                  </article>
+                );
+              })}
             </div>
             <button className="button button-load-more" onClick={startDiscussion}>Start the next conversation <ArrowRight size={15} /></button>
           </div>
 
           <aside className="sidebar" id="discover">
-            <div className="side-card pulse-card" id="pulse">
-              <div className="side-card-heading"><span className="side-icon pink-icon"><Sparkles size={15} /></span><span>COMMUNITY PULSE</span><span className="live-label">LIVE POLL</span></div>
-              <h3>First stop in Leonida?</h3>
-              <p className="poll-description">Your first free-roam move. Where are you heading?</p>
-              <div className="poll-options">
-                {pollOptions.map((option) => {
-                  const isSelected = voted === option.label;
-                  return <button key={option.label} className={`poll-option ${isSelected ? "poll-selected" : ""}`} onClick={() => setVoted(option.label)} disabled={voted !== null}>
-                    {voted !== null && <span className="poll-bar" style={{ width: `${option.percent}%` }} />}
-                    <span className="poll-option-label">{option.label}</span>
-                    {voted !== null && <strong>{option.percent}%</strong>}
-                    {isSelected && <span className="your-vote">YOUR VOTE</span>}
-                  </button>;
-                })}
-              </div>
-              <div className="poll-footer"><span>{voted ? "Thanks for voting · Demo results" : "Vote to reveal the results"}</span><span>{voted ? "SAMPLE RESULTS" : "DEMO POLL"}</span></div>
-            </div>
+            <PollsPanel
+              user={user}
+              onRequireSignIn={() => {
+                setAuthMode("signin");
+                setAuthOpen(true);
+              }}
+            />
 
             <div className="side-card trending-card">
               <div className="side-card-heading"><span className="side-icon orange-icon"><TrendingUp size={15} /></span><span>TRENDING TOPICS</span><Flame className="trending-flame" size={15} /></div>
